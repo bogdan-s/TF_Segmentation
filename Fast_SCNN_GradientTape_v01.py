@@ -1,11 +1,10 @@
-#lowering the model so it doesn t overfit
+
 
 import os
 import sys
 from pathlib import Path
 import datetime
-# from IPython.display import clear_output
-# import IPython.display as display
+
 from glob import glob
 import matplotlib.pyplot as plt
 import tensorflow as tf
@@ -63,8 +62,8 @@ def parse_image(img_path):
     image = tf.io.read_file(img_path)
     image = tf.io.decode_jpeg(image, channels=3)
     
-    mask_path = tf.strings.regex_replace(img_path, "Images", "New_Masks")
-    mask_path = tf.strings.regex_replace(mask_path, ".jpg", "_seg.png")
+    mask_path = tf.strings.regex_replace(img_path, "Images", "Edges")
+    mask_path = tf.strings.regex_replace(mask_path, ".jpg", "_edg.png")
     mask = tf.io.read_file(mask_path)
     mask = tf.io.decode_png(mask, channels=0, dtype=tf.dtypes.uint8)
     print(mask.shape)
@@ -215,9 +214,9 @@ for image, mask in train_dataset.take(1):
     break     
 
 
-
-
 SIZE = IMG_SIZE
+
+
 def down_block(x, filters, kernel_size=(3, 3), padding="same", strides=1):
     c = keras.layers.Conv2D(filters, kernel_size, padding=padding, strides=strides, activation="relu")(x)
     c = keras.layers.Conv2D(filters, kernel_size, padding=padding, strides=strides, activation="relu")(c)
@@ -258,6 +257,159 @@ def UNet():
     model = keras.models.Model(inputs, outputs)
     return model
 
+#Fast scnn from https://github.com/rudolfsteiner/fast_scnn/blob/master/Fast_SCNN.py
+
+def down_sample(input_layer):
+    
+    ds_layer = tf.keras.layers.Conv2D(32, (3,3), padding='same', strides = (2,2))(input_layer)
+    ds_layer = tf.keras.layers.BatchNormalization()(ds_layer)
+    ds_layer = tf.keras.activations.relu(ds_layer)
+    
+    ds_layer = tf.keras.layers.SeparableConv2D(48, (3,3), padding='same', strides = (2,2))(ds_layer)
+    ds_layer = tf.keras.layers.BatchNormalization()(ds_layer)
+    ds_layer = tf.keras.activations.relu(ds_layer)
+    
+    ds_layer = tf.keras.layers.SeparableConv2D(64, (3,3), padding='same', strides = (2,2))(ds_layer)
+    ds_layer = tf.keras.layers.BatchNormalization()(ds_layer)
+    ds_layer = tf.keras.activations.relu(ds_layer)
+    
+    return ds_layer
+    
+
+def _res_bottleneck(inputs, filters, kernel, t, s, r=False):
+    
+    
+    tchannel = tf.keras.backend.int_shape(inputs)[-1] * t
+
+    #x = conv_block(inputs, 'conv', tchannel, (1, 1), strides=(1, 1))
+    x = tf.keras.layers.Conv2D(tchannel, (1,1), padding='same', strides = (1,1))(inputs)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.activations.relu(x)
+
+    x = tf.keras.layers.DepthwiseConv2D(kernel, strides=(s, s), depth_multiplier=1, padding='same')(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.activations.relu(x)
+
+    #x = #conv_block(x, 'conv', filters, (1, 1), strides=(1, 1), padding='same', relu=False)
+    
+    x = tf.keras.layers.Conv2D(filters, (1,1), padding='same', strides = (1,1))(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+
+
+    if r:
+        x = tf.keras.layers.add([x, inputs])
+    return x
+
+"""#### Bottleneck custom method"""
+
+def bottleneck_block(inputs, filters, kernel, t, strides, n):
+    x = _res_bottleneck(inputs, filters, kernel, t, strides)
+
+    for i in range(1, n):
+        x = _res_bottleneck(x, filters, kernel, t, 1, True)
+
+        return x
+
+def global_feature_extractor(lds_layer):
+    gfe_layer = bottleneck_block(lds_layer, 64, (3, 3), t=6, strides=2, n=3)
+    print("gfe_layer.shape:", gfe_layer.shape)
+    gfe_layer = bottleneck_block(gfe_layer, 96, (3, 3), t=6, strides=2, n=3)
+    print("gfe_layer.shape:", gfe_layer.shape)
+    gfe_layer = bottleneck_block(gfe_layer, 128, (3, 3), t=6, strides=1, n=3)
+    print("gfe_layer.shape:", gfe_layer.shape)
+    gfe_layer = pyramid_pooling_block(gfe_layer, [2,4,6,8], gfe_layer.shape[1], gfe_layer.shape[2])
+    print("gfe_layer.shape:", gfe_layer.shape)
+    
+    return gfe_layer
+
+def pyramid_pooling_block(input_tensor, bin_sizes, w, h):
+    print(w, h)
+    concat_list = [input_tensor]
+    #w = 16 # 64
+    #h = 16 #32
+
+    for bin_size in bin_sizes:
+        x = tf.keras.layers.AveragePooling2D(pool_size=(w//bin_size, h//bin_size), 
+                                             strides=(w//bin_size, h//bin_size))(input_tensor)
+        x = tf.keras.layers.Conv2D(128, 3, 2, padding='same')(x)
+        x = tf.keras.layers.Lambda(lambda x: tf.image.resize(x, (w,h)))(x)
+        print("x in paramid.shape", x.shape)
+
+    concat_list.append(x)
+
+    return tf.keras.layers.concatenate(concat_list)
+
+def feature_fusion(lds_layer, gfe_layer):
+    ff_layer1 = tf.keras.layers.Conv2D(128, (1,1), padding='same', strides = (1,1))(lds_layer)
+    ff_layer1 = tf.keras.layers.BatchNormalization()(ff_layer1)
+    #ff_layer1 = tf.keras.activations.relu(ff_layer1)
+    print("ff_layer1.shape", ff_layer1.shape)
+    
+    #ss = conv_block(gfe_layer, 'conv', 128, (1,1), padding='same', strides= (1,1), relu=False)
+    #print(ss.shape, ff_layer1.shape)
+    
+
+    ff_layer2 = tf.keras.layers.UpSampling2D((4, 4))(gfe_layer)
+    print("ff_layer2.shape", ff_layer2.shape)
+    ff_layer2 = tf.keras.layers.DepthwiseConv2D(128, strides=(1, 1), depth_multiplier=1, padding='same')(ff_layer2)
+    
+    print("ff_layer2.shape", ff_layer2.shape)
+    ff_layer2 = tf.keras.layers.BatchNormalization()(ff_layer2)
+    ff_layer2 = tf.keras.activations.relu(ff_layer2)
+    ff_layer2 = tf.keras.layers.Conv2D(128, 1, 1, padding='same', activation=None)(ff_layer2)
+    
+    print("ff_layer2.shape", ff_layer2.shape)
+
+    ff_final = tf.keras.layers.add([ff_layer1, ff_layer2])
+    ff_final = tf.keras.layers.BatchNormalization()(ff_final)
+    ff_final = tf.keras.activations.relu(ff_final)
+    
+    print("ff_final.shape", ff_final.shape)
+    
+    return ff_final
+
+def classifier_layer(ff_final, num_classes):
+    classifier = tf.keras.layers.SeparableConv2D(128, (3, 3), padding='same', 
+                                                 strides = (1, 1), name = 'DSConv1_classifier')(ff_final)
+    classifier = tf.keras.layers.BatchNormalization()(classifier)
+    classifier = tf.keras.activations.relu(classifier)
+    print("classifier.shape", classifier.shape)
+
+    classifier = tf.keras.layers.SeparableConv2D(128, (3, 3), padding='same', 
+                                                 strides = (1, 1), name = 'DSConv2_classifier')(classifier)
+    classifier = tf.keras.layers.BatchNormalization()(classifier)
+    classifier = tf.keras.activations.relu(classifier)
+    print("classifier.shape", classifier.shape)
+    #change 19 to 20
+    #classifier = conv_block(classifier, 'conv', 20, (1, 1), strides=(1, 1), padding='same', relu=True)
+
+    classifier = tf.keras.layers.Conv2D(num_classes, (1,1), padding='same', strides = (1,1))(classifier)
+    classifier = tf.keras.layers.BatchNormalization()(classifier)
+    classifier = tf.keras.activations.relu(classifier)
+    print("classifier.shape", classifier.shape)
+    
+    classifier = tf.keras.layers.Dropout(0.3)(classifier)
+    print("classifier before upsampling:", classifier.shape)
+
+    classifier = tf.keras.activations.softmax(classifier)
+    
+    return classifier
+
+def get_fast_scnn(w, h, num_classes):
+    """
+    input image: (w, h)
+    """
+    
+    input_layer = tf.keras.layers.Input(shape=(w, h, 3), name = 'input_layer')
+    ds_layer = down_sample(input_layer)
+    gfe_layer = global_feature_extractor(ds_layer)
+    ff_final = feature_fusion(ds_layer, gfe_layer)
+    classifier = classifier_layer(ff_final, num_classes)
+    
+    fast_scnn = tf.keras.Model(inputs = input_layer , outputs = classifier, name = 'Fast_SCNN')
+    
+    return fast_scnn
+
 model = UNet()
 
 class MaskMeanIoU(tf.keras.metrics.MeanIoU):
@@ -292,18 +444,24 @@ optimizer_Adam = tf.keras.optimizers.Adam(
     learning_rate=0.001, beta_1=0.9, beta_2=0.999, epsilon=1e-07, amsgrad=False,
     name='Adam')
 
-model.compile(optimizer=Adam(learning_rate=0.001),
-              loss=tf.losses.SparseCategoricalCrossentropy(),
-              metrics=['accuracy', MaskMeanIoU(name='iou', num_classes=OUTPUT_CHANNELS), dsc, tversky], #
-              )  #run_eagerly=True                                                                                                                     # run eager
+loss_object = dsc
+#loss_object = tf.keras.losses.SparseCategoricalCrossentropy()
+loss_history = []
 
-model.summary()
-# tf.keras.utils.plot_model(model, show_shapes=True)                                                                                                # plot model
 
+
+# model.summary()
+
+# model.load_weights("./Weights/U-net_128_16bit_model.h5")
 
 def create_mask(pred_mask):                                                                                                                         # create mask
+    # print("Predicted mask: {}".format(pred_mask))
+    # print("Predicted mask: {}".format(pred_mask.shape))
     pred_mask = tf.argmax(pred_mask, axis=-1)
+    # print("Predicted mask after argmax: {}".format(pred_mask.shape))
     pred_mask = pred_mask[..., tf.newaxis]
+    # print("Predicted mask after added new axis: {}".format(pred_mask.shape))
+    # print("Predicted mask[0]: {}".format(pred_mask[0]))
     return pred_mask[0]
 
 def show_predictions(dataset=None, num=1):
@@ -315,49 +473,57 @@ def show_predictions(dataset=None, num=1):
     display_sample([sample_image, sample_mask,
              create_mask(model.predict(sample_image[tf.newaxis, ...]))])
 
-#                                                                                                                                          load weights from last save
-# if os.path.exists("./Weights/U-net_128_16bit_model_initializer.h5"): 
-#     model.load_weights("./Weights/U-net_128_16bit_model_initializer.h5")
-#     print("Model loded - OK")
+show_predictions(train_dataset, 1)
 
-# show_predictions()
-# model.predict(sample_image[tf.newaxis, ...])
+def visualize_trainable_vars(model):
+    """ function to visualize the trainable variables values. takes a complied model as argument"""
+    trainable_vars_init = [tf.keras.backend.mean(_).numpy() for _ in model.trainable_variables]
+    trainable_vars_names = [_.name for _ in model.trainable_variables]
+    print('Mean values per trainable_vars_init {}'.format(trainable_vars_init))
+    print('Trainable var names {}'.format(trainable_vars_names))
+    x_pos = [i for i, _ in enumerate(trainable_vars_names)]
+    bars = plt.barh(x_pos, trainable_vars_init)
+    plt.yticks(x_pos, zip(trainable_vars_names, trainable_vars_init), rotation=0)
+    plt.show()
 
-# This function keeps the learning rate at 0.001 for the first ten epochs
-# and decreases it exponentially after that.
-def scheduler(epoch):
-  if epoch < 6:
-    return 0.0005
-  else:
-    return 0.0001 #* tf.math.exp(0.1 * (10 - epoch))
+visualize_trainable_vars(model)
 
-LRS = tf.keras.callbacks.LearningRateScheduler(scheduler)
+def train_step(images, masks):
+    with tf.GradientTape() as tape:
+        logits = model(images)
+        print('Logits: {}'.format(logits))
+        print('Logits shape: {}'.format(logits.shape))
+        # print('masks: {}'.format(masks))
+        loss_value = loss_object(masks, logits)
+        print('loss value {}'.format(loss_value))
+    loss_history.append(loss_value.numpy().mean())
+    grads = tape.gradient(loss_value, model.trainable_variables)
+    grad_list = [tf.keras.backend.mean(_).numpy() for _ in grads]
+    print('Mean values per gradient {}'.format(grad_list))
+    plt.plot(grad_list)
+    plt.show()
+    optimizer_Adam.apply_gradients(zip(grads, model.trainable_variables))
+    # print(model.predict(sample_image[tf.newaxis, ...]))
+    # show_predictions(train_dataset, 15)
 
-#  - TensorBoard
-data_folder = Path("c:/TFlogs/fit/")
-log_dir=data_folder / datetime.datetime.now().strftime("%m%d-%H%M%S")  #folder for tensorboard
-tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, write_images=True, write_graph=True) #, profile_batch='50,500', histogram_freq=1, write_graph=True
-
-class DisplayCallback(tf.keras.callbacks.Callback):
-    def on_epoch_end(self, epoch, logs=None):
-        # clear_output(wait=True)
-        # show_predictions()
+def train(epochs):
+    for epoch in range(epochs):
+        no_of_batches = 0
+        for (batch, (images, masks)) in enumerate(train_dataset):
+            no_of_batches += 1
+            if no_of_batches < 3:
+                print('Batch no {} of epoch {}'.format(batch, epoch))
+                # print('Images shape: {}'.format(images.shape))
+                # print('Masks shape: {}'.format(masks.shape))
+                train_step(images, masks)
+            else: 
+                break
+        print ('Epoch {} finished'.format(epoch))
+        # visualize_trainable_vars(model)
         # show_predictions(train_dataset, 1)
-        print ('\nSample Prediction after epoch {}\n'.format(epoch+1))
-        model.save_weights("./Weights/U-net_512_v2_model.h5")
+
+train(epochs = 2)
 
 
 
-VALIDATION_STEPS = VAL_LENGTH // BATCH_SIZE
-
-model_history = model.fit(train_dataset, epochs=EPOCHS,
-                          steps_per_epoch=STEPS_PER_EPOCH,
-                          validation_steps=VALIDATION_STEPS,
-                          validation_data=test_dataset,
-                          callbacks=[DisplayCallback(), tensorboard_callback, LRS])  #LRS, 
-
-
-
-show_predictions(train_dataset, 3)
-show_predictions(test_dataset, 3)
-
+show_predictions()

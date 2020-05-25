@@ -1,4 +1,4 @@
-#lowering the model so it doesn t overfit
+#new loss function
 
 import os
 import sys
@@ -13,11 +13,10 @@ from tensorflow import keras
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.layers import Conv2D, Input, MaxPooling2D, Dropout, concatenate, UpSampling2D
-
 import tensorflow_addons as tfa
 
 
-# # Device Compute Precision - mixed precision
+
 # from tensorflow.keras.mixed_precision import experimental as mixed_precision
 # policy = mixed_precision.Policy('mixed_float16')
 # mixed_precision.set_policy(policy)
@@ -32,7 +31,7 @@ IMG_SIZE_Before_Crop = 530 #150 for 128 final image
 IMG_SIZE = 512
 BATCH_SIZE = 6
 OUTPUT_CHANNELS = 2
-EPOCHS = 60
+EPOCHS = 20
 away_from_computer = True  # to show or not predictions between batches
 save_model_for_inference = False # to save or not the model for inference
 SEED = 15
@@ -62,6 +61,7 @@ def parse_image(img_path):
     """
     image = tf.io.read_file(img_path)
     image = tf.io.decode_jpeg(image, channels=3)
+    # image = tf.io.convert_image_dtype(image, tf.uint8)
     
     mask_path = tf.strings.regex_replace(img_path, "Images", "New_Masks")
     mask_path = tf.strings.regex_replace(mask_path, ".jpg", "_seg.png")
@@ -77,6 +77,29 @@ test_set = val_imgs.map(parse_image, num_parallel_calls=AUTOTUNE)
 dataset = {"train": train_set, "test": test_set}
 
 print(dataset.keys())
+
+# first I create the function to normalize, resize and apply some data augmentation on my dataset:
+
+# @tf.function
+def normalize(input_image: tf.Tensor, input_mask: tf.Tensor) -> tuple:
+    """Rescale the pixel values of the images between 0.0 and 1.0
+    compared to [0,255] originally.
+
+    Parameters
+    ----------
+    input_image : tf.Tensor
+        Tensorflow tensor containing an image of IMG_SIZE [IMG_SIZE,IMG_SIZE,3].
+    input_mask : tf.Tensor
+        Tensorflow tensor containing an annotation of IMG_SIZE [IMG_SIZE,IMG_SIZE,1].
+
+    Returns
+    -------
+    tuple
+        Normalized image and its annotation.
+    """
+    input_image = tf.cast(input_image, tf.float16) / 255.0
+    input_mask = tf.cast(input_mask, tf.uint8) / 255
+    return input_image, input_mask
 
 # @tf.function
 def load_image_train(datapoint: dict) -> tuple:
@@ -106,6 +129,8 @@ def load_image_train(datapoint: dict) -> tuple:
         input_image = tf.image.flip_left_right(input_image)
         input_mask = tf.image.flip_left_right(input_mask)
     
+    # input_image, input_mask = normalize(input_image, input_mask)
+
     input_image = input_image / 255
     input_mask = tf.image.rgb_to_grayscale(input_mask)
     input_mask = tf.floor(input_mask / 255 + 0.5)
@@ -146,12 +171,14 @@ def load_image_test(datapoint: dict) -> tuple:
     input_image = tf.image.resize(datapoint['image'], (IMG_SIZE, IMG_SIZE), method='area')
     input_mask = tf.image.resize(datapoint['segmentation_mask'], (IMG_SIZE, IMG_SIZE), method='area')
 
+    # input_image, input_mask = normalize(input_image, input_mask)
     input_image = input_image / 255
     input_mask = tf.image.rgb_to_grayscale(input_mask)
     input_mask = tf.floor(input_mask / 255 + 0.5)
 
     return input_image, input_mask
 
+# Then I set some parameters related to my dataset:
 
 train_imgs = glob(Train_Images_Path + "*.jpg")
 val_imgs = glob(Val_Images_Path + "*.jpg")
@@ -176,7 +203,7 @@ train_dataset = train.cache().shuffle(buffer_size=TRAIN_LENGTH, seed=SEED, reshu
 train_dataset = train_dataset.map(train_random_crop, num_parallel_calls=AUTOTUNE)                                                       #  apply random_crop | if disabled adjust image resize in load_image_train
 train_dataset = train_dataset.batch(BATCH_SIZE).repeat() #
 train_dataset = train_dataset.prefetch(buffer_size=AUTOTUNE)
-
+# train_dataset = train_dataset.cache().shuffle(BATCH_SIZE, reshuffle_each_iteration=True).repeat().prefetch(buffer_size=AUTOTUNE)  #buffer_size=AUTOTUNE
 
 
 
@@ -213,7 +240,16 @@ for image, mask in train_dataset.take(1):
     print("Shape image[0] dataset.take(1): {}".format(sample_image[0].shape))
     print("Shape mask[0] dataset.take(1): {}".format(sample_mask[0].shape))
     break     
+#     # print(tf.reduce_min(sample_mask), tf.reduce_mean(sample_mask), tf.reduce_max(sample_mask))
+#     # print(sample_image.shape)
+#     print(sample_mask.shape)
+#     t1d = tf.reshape(sample_mask, shape=(-1,)) # create a 1D tensor
+#     print(t1d.shape)
+#     uniques, _ = tf.unique(t1d)   # check for unique values to see how the mask was resized
+#     print(uniques)
+#     display_sample([sample_image, sample_mask])
 
+# print('train daset: ', train)
 
 
 
@@ -316,48 +352,12 @@ def show_predictions(dataset=None, num=1):
              create_mask(model.predict(sample_image[tf.newaxis, ...]))])
 
 #                                                                                                                                          load weights from last save
-# if os.path.exists("./Weights/U-net_128_16bit_model_initializer.h5"): 
-#     model.load_weights("./Weights/U-net_128_16bit_model_initializer.h5")
-#     print("Model loded - OK")
+if os.path.exists("./Weights/U-net_512_v2_model.h5"): 
+    model.load_weights("./Weights/U-net_512_v2_model.h5")
+    print("Model weights loded - OK")
 
-# show_predictions()
+show_predictions()
+
+model.save('./Weights/U-net_512_v2_full_model.h5')
 # model.predict(sample_image[tf.newaxis, ...])
-
-# This function keeps the learning rate at 0.001 for the first ten epochs
-# and decreases it exponentially after that.
-def scheduler(epoch):
-  if epoch < 6:
-    return 0.0005
-  else:
-    return 0.0001 #* tf.math.exp(0.1 * (10 - epoch))
-
-LRS = tf.keras.callbacks.LearningRateScheduler(scheduler)
-
-#  - TensorBoard
-data_folder = Path("c:/TFlogs/fit/")
-log_dir=data_folder / datetime.datetime.now().strftime("%m%d-%H%M%S")  #folder for tensorboard
-tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, write_images=True, write_graph=True) #, profile_batch='50,500', histogram_freq=1, write_graph=True
-
-class DisplayCallback(tf.keras.callbacks.Callback):
-    def on_epoch_end(self, epoch, logs=None):
-        # clear_output(wait=True)
-        # show_predictions()
-        # show_predictions(train_dataset, 1)
-        print ('\nSample Prediction after epoch {}\n'.format(epoch+1))
-        model.save_weights("./Weights/U-net_512_v2_model.h5")
-
-
-
-VALIDATION_STEPS = VAL_LENGTH // BATCH_SIZE
-
-model_history = model.fit(train_dataset, epochs=EPOCHS,
-                          steps_per_epoch=STEPS_PER_EPOCH,
-                          validation_steps=VALIDATION_STEPS,
-                          validation_data=test_dataset,
-                          callbacks=[DisplayCallback(), tensorboard_callback, LRS])  #LRS, 
-
-
-
-show_predictions(train_dataset, 3)
-show_predictions(test_dataset, 3)
 

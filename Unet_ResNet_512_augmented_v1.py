@@ -32,7 +32,7 @@ IMG_SIZE_Before_Crop = 530 #150 for 128 final image
 IMG_SIZE = 512
 BATCH_SIZE = 6
 OUTPUT_CHANNELS = 2
-EPOCHS = 60
+EPOCHS = 15
 away_from_computer = True  # to show or not predictions between batches
 save_model_for_inference = False # to save or not the model for inference
 SEED = 15
@@ -214,51 +214,78 @@ for image, mask in train_dataset.take(1):
     print("Shape mask[0] dataset.take(1): {}".format(sample_mask[0].shape))
     break     
 
-
-
-
 SIZE = IMG_SIZE
-def down_block(x, filters, kernel_size=(3, 3), padding="same", strides=1):
-    c = keras.layers.Conv2D(filters, kernel_size, padding=padding, strides=strides, activation="relu")(x)
-    c = keras.layers.Conv2D(filters, kernel_size, padding=padding, strides=strides, activation="relu")(c)
-    p = keras.layers.MaxPool2D((2, 2), (2, 2))(c)
-    return c, p
 
-def up_block(x, skip, filters, kernel_size=(3, 3), padding="same", strides=1):
-    us = keras.layers.UpSampling2D((2, 2))(x)
-    concat = keras.layers.Concatenate()([us, skip])
-    c = keras.layers.Conv2D(filters, kernel_size, padding=padding, strides=strides, activation="relu")(concat)
-    c = keras.layers.Conv2D(filters, kernel_size, padding=padding, strides=strides, activation="relu")(c)
+def bn_act(x, act=True):
+    x = keras.layers.BatchNormalization()(x)
+    if act == True:
+        x = keras.layers.Activation("relu")(x)
+    return x
+
+def conv_block(x, filters, kernel_size=(3, 3), padding="same", strides=1):
+    conv = bn_act(x)
+    conv = keras.layers.Conv2D(filters, kernel_size, padding=padding, strides=strides)(conv)
+    return conv
+
+def stem(x, filters, kernel_size=(3, 3), padding="same", strides=1):
+    conv = keras.layers.Conv2D(filters, kernel_size, padding=padding, strides=strides)(x)
+    conv = conv_block(conv, filters, kernel_size=kernel_size, padding=padding, strides=strides)
+    
+    shortcut = keras.layers.Conv2D(filters, kernel_size=(1, 1), padding=padding, strides=strides)(x)
+    shortcut = bn_act(shortcut, act=False)
+    
+    output = keras.layers.Add()([conv, shortcut])
+    return output
+
+def residual_block(x, filters, kernel_size=(3, 3), padding="same", strides=1):
+    res = conv_block(x, filters, kernel_size=kernel_size, padding=padding, strides=strides)
+    res = conv_block(res, filters, kernel_size=kernel_size, padding=padding, strides=1)
+    
+    shortcut = keras.layers.Conv2D(filters, kernel_size=(1, 1), padding=padding, strides=strides)(x)
+    shortcut = bn_act(shortcut, act=False)
+    
+    output = keras.layers.Add()([shortcut, res])
+    return output
+
+def upsample_concat_block(x, xskip):
+    u = keras.layers.UpSampling2D((2, 2))(x)
+    c = keras.layers.Concatenate()([u, xskip])
     return c
 
-def bottleneck(x, filters, kernel_size=(3, 3), padding="same", strides=1):
-    c = keras.layers.Conv2D(filters, kernel_size, padding=padding, strides=strides, activation="relu")(x)
-    c = keras.layers.Conv2D(filters, kernel_size, padding=padding, strides=strides, activation="relu")(c)
-    return c
 
-def UNet():
+def ResUNet():
     f1 = [32, 64, 128, 256, 512]
     f = [_/4 for _ in f1]
     inputs = keras.layers.Input((IMG_SIZE, IMG_SIZE, 3))
     
-    p0 = inputs
-    c1, p1 = down_block(p0, f[0]) #128 -> 64
-    c2, p2 = down_block(p1, f[1]) #64 -> 32
-    c3, p3 = down_block(p2, f[2]) #32 -> 16
-    c4, p4 = down_block(p3, f[3]) #16->8
+    ## Encoder
+    e0 = inputs
+    e1 = stem(e0, f[0])
+    e2 = residual_block(e1, f[1], strides=2)
+    e3 = residual_block(e2, f[2], strides=2)
+    e4 = residual_block(e3, f[3], strides=2)
     
-    bn = bottleneck(p4, f[4])
+    ## Bridge
+    b0 = residual_block(e4, f[4], strides=2)
+
+    ## Decoder
+    u1 = upsample_concat_block(b0, e4)
+    d1 = residual_block(u1, f[4])
     
-    u1 = up_block(bn, c4, f[3]) #8 -> 16
-    u2 = up_block(u1, c3, f[2]) #16 -> 32
-    u3 = up_block(u2, c2, f[1]) #32 -> 64
-    u4 = up_block(u3, c1, f[0]) #64 -> 128
+    u2 = upsample_concat_block(d1, e3)
+    d2 = residual_block(u2, f[3])
+    
+    u3 = upsample_concat_block(d2, e2)
+    d3 = residual_block(u3, f[2])
+    
+    u4 = upsample_concat_block(d3, e1)
+    d4 = residual_block(u4, f[1])
     
     outputs = keras.layers.Conv2D(2, (1,1), padding="same", activation="softmax")(u4)
     model = keras.models.Model(inputs, outputs)
     return model
 
-model = UNet()
+model = ResUNet()
 
 class MaskMeanIoU(tf.keras.metrics.MeanIoU):
     #                                                                                                    Mean Intersection over Union
@@ -342,9 +369,9 @@ class DisplayCallback(tf.keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
         # clear_output(wait=True)
         # show_predictions()
-        # show_predictions(train_dataset, 1)
+        show_predictions(train_dataset, 1)
         print ('\nSample Prediction after epoch {}\n'.format(epoch+1))
-        model.save_weights("./Weights/U-net_512_v2_model.h5")
+        model.save_weights("./Weights/U-net_ResNet_512_v1_4_model.h5")
 
 
 

@@ -63,8 +63,8 @@ def parse_image(img_path):
     image = tf.io.read_file(img_path)
     image = tf.io.decode_jpeg(image, channels=3)
     
-    mask_path = tf.strings.regex_replace(img_path, "Images", "New_Masks")
-    mask_path = tf.strings.regex_replace(mask_path, ".jpg", "_seg.png")
+    mask_path = tf.strings.regex_replace(img_path, "Images", "Edges")
+    mask_path = tf.strings.regex_replace(mask_path, ".jpg", "_edg.png")
     mask = tf.io.read_file(mask_path)
     mask = tf.io.decode_png(mask, channels=0, dtype=tf.dtypes.uint8)
     print(mask.shape)
@@ -320,7 +320,7 @@ def show_predictions(dataset=None, num=1):
 #     model.load_weights("./Weights/U-net_128_16bit_model_initializer.h5")
 #     print("Model loded - OK")
 
-# show_predictions()
+show_predictions()
 # model.predict(sample_image[tf.newaxis, ...])
 
 # This function keeps the learning rate at 0.001 for the first ten epochs
@@ -341,10 +341,10 @@ tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, write_ima
 class DisplayCallback(tf.keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
         # clear_output(wait=True)
-        # show_predictions()
+        show_predictions()
         # show_predictions(train_dataset, 1)
         print ('\nSample Prediction after epoch {}\n'.format(epoch+1))
-        model.save_weights("./Weights/U-net_512_v2_model.h5")
+        # model.save_weights("./Weights/U-net_512_edges.h5")
 
 
 
