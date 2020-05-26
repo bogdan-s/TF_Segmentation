@@ -1,11 +1,10 @@
-#lowering the model so it doesn t overfit
+
 
 import os
 import sys
 from pathlib import Path
 import datetime
-# from IPython.display import clear_output
-# import IPython.display as display
+
 from glob import glob
 import matplotlib.pyplot as plt
 import tensorflow as tf
@@ -28,7 +27,7 @@ print(tf.__version__, end='\n\n')
 print("TensorFlow version: {}".format(tf.__version__))
 print("Eager execution: {}".format(tf.executing_eagerly()))
 # param
-IMG_SIZE_Before_Crop = 530 #150 for 128 final image
+IMG_SIZE_Before_Crop = 512 #150 for 128 final image
 IMG_SIZE = 512
 BATCH_SIZE = 6
 OUTPUT_CHANNELS = 2
@@ -172,8 +171,8 @@ train = dataset['train'].map(load_image_train, num_parallel_calls=AUTOTUNE)
 # print(tf.data.Dataset.cardinality(test).numpy())
 
 
-train_dataset = train.cache().shuffle(buffer_size=TRAIN_LENGTH, seed=SEED, reshuffle_each_iteration=True)
-train_dataset = train_dataset.map(train_random_crop, num_parallel_calls=AUTOTUNE)                                                       #  apply random_crop | if disabled adjust image resize in load_image_train
+train_dataset = train.cache() #.shuffle(buffer_size=TRAIN_LENGTH, seed=SEED, reshuffle_each_iteration=True)
+#train_dataset = train_dataset.map(train_random_crop, num_parallel_calls=AUTOTUNE)                                                       #  apply random_crop | if disabled adjust image resize in load_image_train
 train_dataset = train_dataset.batch(BATCH_SIZE).repeat() #
 train_dataset = train_dataset.prefetch(buffer_size=AUTOTUNE)
 
@@ -214,78 +213,212 @@ for image, mask in train_dataset.take(1):
     print("Shape mask[0] dataset.take(1): {}".format(sample_mask[0].shape))
     break     
 
+
 SIZE = IMG_SIZE
 
-def bn_act(x, act=True):
-    x = keras.layers.BatchNormalization()(x)
-    if act == True:
-        x = keras.layers.Activation("relu")(x)
-    return x
+def pyramid_pooling(input_tensor, sub_region_sizes):
+    """This class implements the Pyramid Pooling Module
+    WARNING: This function uses eager execution, so it only works with
+        Tensorflow 2.0 backend.
+    Args:
+        input_tensor: Tensor with shape: (batch, rows, cols, channels)
+        sub_region_sizes: A list containing the size of each region for the
+            sub-region average pooling. The default value is [1, 2, 3, 6]
+    Returns:
+        output_tensor: Tensor with shape: (batch, rows, cols, channels * 2)
+    """
+    _, input_height, input_width, input_channels = input_tensor.shape
+    feature_maps = [input_tensor]
+    for i in sub_region_sizes:
+        curr_feature_map = keras.layers.AveragePooling2D(
+            pool_size=(input_height // i, input_width // i),
+            strides=(input_height // i, input_width // i))(input_tensor)
+        curr_feature_map = keras.layers.Conv2D(
+            filters=int(input_channels) // len(sub_region_sizes),
+            kernel_size=3,
+            padding='same')(curr_feature_map)
+        curr_feature_map = keras.layers.Lambda(
+            lambda x: tf.image.resize(
+                x, (input_height, input_width)))(curr_feature_map)
+        feature_maps.append(curr_feature_map)
 
-def conv_block(x, filters, kernel_size=(3, 3), padding="same", strides=1):
-    conv = bn_act(x)
-    conv = keras.layers.Conv2D(filters, kernel_size, padding=padding, strides=strides)(conv)
-    return conv
+    output_tensor = keras.layers.Concatenate(axis=-1)(feature_maps)
 
-def stem(x, filters, kernel_size=(3, 3), padding="same", strides=1):
-    conv = keras.layers.Conv2D(filters, kernel_size, padding=padding, strides=strides)(x)
-    conv = conv_block(conv, filters, kernel_size=kernel_size, padding=padding, strides=strides)
-    
-    shortcut = keras.layers.Conv2D(filters, kernel_size=(1, 1), padding=padding, strides=strides)(x)
-    shortcut = bn_act(shortcut, act=False)
-    
-    output = keras.layers.Add()([conv, shortcut])
-    return output
+    output_tensor = keras.layers.Conv2D(
+        filters=128, kernel_size=3, strides=1, padding="same")(
+        output_tensor)
+    output_tensor = keras.layers.BatchNormalization()(output_tensor)
+    output_tensor = keras.layers.Activation("relu")(output_tensor)
+    return output_tensor
 
-def residual_block(x, filters, kernel_size=(3, 3), padding="same", strides=1):
-    res = conv_block(x, filters, kernel_size=kernel_size, padding=padding, strides=strides)
-    res = conv_block(res, filters, kernel_size=kernel_size, padding=padding, strides=1)
-    
-    shortcut = keras.layers.Conv2D(filters, kernel_size=(1, 1), padding=padding, strides=strides)(x)
-    shortcut = bn_act(shortcut, act=False)
-    
-    output = keras.layers.Add()([shortcut, res])
-    return output
+def bottleneck(input_tensor, filters, strides, expansion_factor):
+    """Implementing Bottleneck.
+    This class implements the bottleneck module for Fast-SCNN.
+    Layer structure:
+        ----------------------------------------------------------------
+        |  Input shape   |  Block  |  Kernel | Stride |  Output shape  |
+        |                |         |   size  |        |                |
+        |----------------|---------|---------|--------|----------------|
+        |   h * w * c    |  Conv2D |    1    |    1   |   h * w * tc   |
+        |----------------|---------|---------|--------|----------------|
+        |   h * w * tc   |  DWConv |    3    |    s   | h/s * w/s * tc |
+        |----------------|---------|---------|--------|----------------|
+        | h/s * w/s * tc |  Conv2D |    1    |    1   | h/s * w/s * c` |
+        |--------------------------------------------------------------|
+        Designations:
+            h: input height
+            w: input width
+            c: number of input channels
+            t: expansion factor
+            c`: number of output channels
+            DWConv: depthwise convolution
+    Args:
+        input_tensor: Tensor with shape: (batch, rows, cols, channels)
+        filters: Output filters
+        strides: Stride used in depthwise convolution layer
+        expansion_factor: hyperparameter
+    Returns:
+        output_tensor: Tensor with shape: (batch, rows // stride,
+            cols // stride, new_channels)
+    """
+    _, input_height, input_width, input_channels = input_tensor.shape
+    tensor = keras.layers.Conv2D(
+        filters=input_channels * expansion_factor,
+        kernel_size=1,
+        strides=1,
+        padding="same",
+        activation="relu")(input_tensor)
+    tensor = keras.layers.BatchNormalization()(tensor)
+    tensor = keras.layers.Activation('relu')(tensor)
 
-def upsample_concat_block(x, xskip):
-    u = keras.layers.UpSampling2D((2, 2))(x)
-    c = keras.layers.Concatenate()([u, xskip])
-    return c
+    tensor = keras.layers.DepthwiseConv2D(kernel_size=3,
+                                          strides=strides,
+                                          padding="same")(tensor)
+    tensor = keras.layers.BatchNormalization()(tensor)
+    tensor = keras.layers.Activation('relu')(tensor)
 
+    tensor = keras.layers.Conv2D(filters=filters,
+                                 kernel_size=1,
+                                 strides=1,
+                                 padding="same")(tensor)
+    tensor = keras.layers.BatchNormalization()(tensor)
+    output_tensor = keras.layers.Activation('relu')(tensor)
+    return output_tensor
 
-def ResUNet():
-    f1 = [32, 64, 128, 256, 512]
-    f = [_/4 for _ in f1]
-    inputs = keras.layers.Input((IMG_SIZE, IMG_SIZE, 3))
-    
-    ## Encoder
-    e0 = inputs
-    e1 = stem(e0, f[0])
-    e2 = residual_block(e1, f[1], strides=2)
-    e3 = residual_block(e2, f[2], strides=2)
-    e4 = residual_block(e3, f[3], strides=2)
-    
-    ## Bridge
-    b0 = residual_block(e4, f[4], strides=2)
+def create_fast_scnn(num_classes, input_shape=[None, None, 3], sub_region_sizes=[1, 2, 3, 6], expansion_factor=6):
+    """This function creates a Fast-SCNN neural network model using
+    the Keras functional API.
+    Args:
+        num_classes: Number of classes
+        input_shape: A list containing information about the size of the image.
+            List structure: (rows, cols, channels). Dimensions can also be
+            None if they can be of any size.
+        expansion_factor: Hyperparameter in the bottleneck layer
+        sub_region_sizes: A list containing the sizes of subregions for
+            average pool by region in the pyramidal pool module
+    Returns:
+        model: uncompiled Keras model
+    """
 
-    ## Decoder
-    u1 = upsample_concat_block(b0, e4)
-    d1 = residual_block(u1, f[4])
-    
-    u2 = upsample_concat_block(d1, e3)
-    d2 = residual_block(u2, f[3])
-    
-    u3 = upsample_concat_block(d2, e2)
-    d3 = residual_block(u3, f[2])
-    
-    u4 = upsample_concat_block(d3, e1)
-    d4 = residual_block(u4, f[1])
-    
-    outputs = keras.layers.Conv2D(2, (1,1), padding="same", activation="softmax")(u4)
-    model = keras.models.Model(inputs, outputs)
+    # Sub-models for every Fast-SCNN block
+
+    input_tensor = keras.layers.Input(input_shape)
+
+    learning_to_down_sample = keras.layers.Conv2D(
+        32, 3, 2, padding="same")(input_tensor)
+    learning_to_down_sample = keras.layers.BatchNormalization()(
+        learning_to_down_sample)
+    learning_to_down_sample = keras.layers.Activation("relu")(
+        learning_to_down_sample)
+
+    learning_to_down_sample = keras.layers.SeparableConv2D(
+        48, 3, 2, padding="same")(learning_to_down_sample)
+    learning_to_down_sample = keras.layers.BatchNormalization()(
+        learning_to_down_sample)
+    learning_to_down_sample = keras.layers.Activation("relu")(
+        learning_to_down_sample)
+
+    learning_to_down_sample = keras.layers.SeparableConv2D(
+        64, 3, 2, padding="same")(learning_to_down_sample)
+    learning_to_down_sample = keras.layers.BatchNormalization()(
+        learning_to_down_sample)
+    learning_to_down_sample = keras.layers.Activation("relu")(
+        learning_to_down_sample)
+
+    skip_connection = learning_to_down_sample
+
+    # Global feature extractor
+
+    global_feature_extractor = bottleneck(learning_to_down_sample,
+                                          64, 2, expansion_factor)
+    global_feature_extractor = bottleneck(global_feature_extractor,
+                                          64, 1, expansion_factor)
+    global_feature_extractor = bottleneck(global_feature_extractor,
+                                          64, 1, expansion_factor)
+
+    global_feature_extractor = bottleneck(global_feature_extractor,
+                                          96, 2, expansion_factor)
+    global_feature_extractor = bottleneck(global_feature_extractor,
+                                          96, 1, expansion_factor)
+    global_feature_extractor = bottleneck(global_feature_extractor,
+                                          96, 1, expansion_factor)
+
+    global_feature_extractor = bottleneck(global_feature_extractor,
+                                          128, 1, expansion_factor)
+    global_feature_extractor = bottleneck(global_feature_extractor,
+                                          128, 1, expansion_factor)
+    global_feature_extractor = bottleneck(global_feature_extractor,
+                                          128, 1, expansion_factor)
+    global_feature_extractor = pyramid_pooling(global_feature_extractor,
+                                               sub_region_sizes)
+
+    # Feature fusion
+
+    feature_fusion_main_branch = keras.layers.UpSampling2D((4, 4))(
+        global_feature_extractor)
+
+    feature_fusion_main_branch = keras.layers.DepthwiseConv2D(
+        3, padding="same")(feature_fusion_main_branch)
+    feature_fusion_main_branch = keras.layers.BatchNormalization()(
+        feature_fusion_main_branch)
+    feature_fusion_main_branch = keras.layers.Activation("relu")(
+        feature_fusion_main_branch)
+    feature_fusion_main_branch = keras.layers.Conv2D(
+        128, 1, 1, padding="same")(feature_fusion_main_branch)
+    feature_fusion_main_branch = keras.layers.BatchNormalization()(
+        feature_fusion_main_branch)
+
+    feature_fusion_skip_connection = keras.layers.Conv2D(
+        128, 1, 1, padding="same")(skip_connection)
+    feature_fusion_skip_connection = keras.layers.BatchNormalization()(
+        feature_fusion_skip_connection)
+
+    feature_fusion = feature_fusion_main_branch + feature_fusion_skip_connection
+
+    # Classifier
+
+    classifier = keras.layers.SeparableConv2D(128, 3, 1, padding="same")(
+        feature_fusion)
+    classifier = keras.layers.BatchNormalization()(classifier)
+    classifier = keras.layers.Activation("relu")(classifier)
+
+    classifier = keras.layers.SeparableConv2D(128, 3, 1, padding="same")(
+        classifier)
+    classifier = keras.layers.BatchNormalization()(classifier)
+    classifier = keras.layers.Activation("relu")(classifier)
+
+    classifier = keras.layers.Conv2D(num_classes, 3, 1, padding="same")(
+        classifier)
+    classifier = keras.layers.BatchNormalization()(classifier)
+    classifier = keras.layers.Activation("relu")(classifier)
+
+    output_tensor = keras.layers.UpSampling2D((8, 8))(classifier)
+    output_tensor = keras.layers.Softmax()(output_tensor)
+
+    model = keras.models.Model(input_tensor, output_tensor)
     return model
 
-model = ResUNet()
+model = create_fast_scnn(2, input_shape=[SIZE, SIZE, 3] )
 
 class MaskMeanIoU(tf.keras.metrics.MeanIoU):
     #                                                                                                    Mean Intersection over Union
@@ -369,9 +502,9 @@ class DisplayCallback(tf.keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
         # clear_output(wait=True)
         # show_predictions()
-        # show_predictions(train_dataset, 1)
+        show_predictions(train_dataset, 2)
         print ('\nSample Prediction after epoch {}\n'.format(epoch+1))
-        model.save_weights("./Weights/U-net_ResNet_512_v1_4_model.h5")
+        model.save_weights("./Weights/U-net_512_v2_model.h5")
 
 
 
@@ -387,4 +520,3 @@ model_history = model.fit(train_dataset, epochs=EPOCHS,
 
 show_predictions(train_dataset, 3)
 show_predictions(test_dataset, 3)
-

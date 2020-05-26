@@ -23,7 +23,7 @@ Unet_512_edges
     - loss function not helping this unbalanced task
 
 Fast SCNN
-    - not finished 
+    - based on https://github.com/templeblock/fast-scnn-keras/blob/master/model/model.py
 
 UNet ResNet 
     - implementation from https://github.com/foobar167/articles/blob/master/Machine_Learning/code_examples/deep_residual_unet_segmentation.ipynb

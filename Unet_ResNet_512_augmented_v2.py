@@ -35,7 +35,7 @@ OUTPUT_CHANNELS = 2
 EPOCHS = 60
 away_from_computer = True  # to show or not predictions between batches
 save_model_for_inference = False # to save or not the model for inference
-SEED = 15
+SEED = 19
 
 # dataset location
 Train_Images_Path = "D:/Python/DataSets/ADE20K_Filtered/Train/Images/0/"
@@ -342,10 +342,10 @@ def show_predictions(dataset=None, num=1):
     display_sample([sample_image, sample_mask,
              create_mask(model.predict(sample_image[tf.newaxis, ...]))])
 
-#                                                                                                                                          load weights from last save
-# if os.path.exists("./Weights/U-net_128_16bit_model_initializer.h5"): 
-#     model.load_weights("./Weights/U-net_128_16bit_model_initializer.h5")
-#     print("Model loded - OK")
+#   #######                                                                                                                                 load weights from last save
+if os.path.exists("./Weights/U-net_ResNet_512_v1_4_model.h5"): 
+    model.load_weights("./Weights/U-net_ResNet_512_v1_4_model.h5")
+    print("Model loded - OK")
 
 # show_predictions()
 # model.predict(sample_image[tf.newaxis, ...])
@@ -353,9 +353,9 @@ def show_predictions(dataset=None, num=1):
 # This function keeps the learning rate at 0.001 for the first ten epochs
 # and decreases it exponentially after that.
 def scheduler(epoch):
-  if epoch < 6:
-    return 0.0005
-  else:
+#   if epoch < 6:
+#     return 0.0005
+#   else:
     return 0.0001 #* tf.math.exp(0.1 * (10 - epoch))
 
 LRS = tf.keras.callbacks.LearningRateScheduler(scheduler)
@@ -371,7 +371,7 @@ class DisplayCallback(tf.keras.callbacks.Callback):
         # show_predictions()
         # show_predictions(train_dataset, 1)
         print ('\nSample Prediction after epoch {}\n'.format(epoch+1))
-        model.save_weights("./Weights/U-net_ResNet_512_v1_4_model.h5")
+        model.save("./Weights/U-net_ResNet_512_v1_4_model")
 
 
 
