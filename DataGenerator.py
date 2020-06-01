@@ -1,6 +1,7 @@
 import tensorflow as tf
 import math
 
+
 class CustomDataGenerator(tf.data.Dataset):
     def __init__(self):
         super().__init__()
@@ -26,8 +27,8 @@ class CustomDataGenerator(tf.data.Dataset):
         test_images_path = tf.strings.regex_replace(train_images_path, "Train", "Validation")
         test = cls.list_files(test_images_path + "*.jpg", shuffle=False)
         
-        train_length = tf.data.experimental.cardinality(train)
-        test_length = tf.data.experimental.cardinality(test)
+        train_length = tf.data.experimental.cardinality(train).numpy()
+        test_length = tf.data.experimental.cardinality(test).numpy()
 
         #generate generators of dictionaries of images and masks - dtype - uint8
         train = train.map(cls.parse_image, num_parallel_calls=tf.data.experimental.AUTOTUNE)
@@ -65,14 +66,21 @@ class CustomDataGenerator(tf.data.Dataset):
 
             return image, mask
 
+
         def crop_image_train(image_to_crop, mask_to_crop) -> tuple:
-            #crop them
-            #if image_crop:
-            image = tf.image.random_crop(image_to_crop, size=[image_size, image_size, 3]) #, seed=seed
-            mask = tf.image.random_crop(mask_to_crop, size=[image_size, image_size, 1]) #, seed=seed           
+            """
+            because the random crop had inconsistencies (different seeds) between the image and the mask 
+            i combined them in one tensor that i random crop and after that i split them back
+            """
+            concatenated = tf.keras.backend.concatenate((image_to_crop, mask_to_crop), axis=-1)
+            concatenated = tf.image.random_crop(concatenated, size=[image_size, image_size, 4])
+            image = concatenated[:,:,:-1]
+            mask = concatenated[:,:,-1:]
+            mask = tf.cast(mask, tf.int64)
             return image, mask
 
         #function that prepreocesses the test images
+
         def load_image_test(dataset) -> tuple:
             #resize the images
             image = tf.image.resize(dataset["image"], (image_size,image_size), method="area")
@@ -134,7 +142,7 @@ if __name__ == "__main__":
     train_dataset, test_dataset, train_length, test_length = CustomDataGenerator.from_path(
                                                                 train_images_path, 
                                                                 seed=2020, 
-                                                                shuffle=True,
+                                                                shuffle=False,
                                                                 batch_size=256,
                                                                 image_crop=True) #, image_size=512, image_crop=True, seed=2020, batch_size=64
     
@@ -163,4 +171,6 @@ if __name__ == "__main__":
         # print(masks)
         if i == 1:
             break
+
+
 

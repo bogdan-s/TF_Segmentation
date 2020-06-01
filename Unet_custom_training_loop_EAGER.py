@@ -13,7 +13,7 @@ from tensorflow import keras
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.layers import Conv2D, Input, MaxPooling2D, Dropout, concatenate, UpSampling2D
-import pix2pix
+
 import tensorflow_addons as tfa
 
 
@@ -383,14 +383,16 @@ def visualize_trainable_vars(model):
     plt.yticks(x_pos, zip(trainable_vars_names, trainable_vars_init), rotation=0)
     plt.show()
 
-visualize_trainable_vars(model)
+# visualize_trainable_vars(model)
 
 def train_step(images, masks):
     with tf.GradientTape() as tape:
         logits = model(images)
-        print('Logits: {}'.format(logits))
+        # print('Logits: {}'.format(logits))
         print('Logits shape: {}'.format(logits.shape))
-        # print('masks: {}'.format(masks))
+        print('masks shape: {}'.format(masks.shape))
+        print('Logits type: {}'.format(logits.dtype))
+        print('masks type: {}'.format(masks.dtype))
         loss_value = loss_object(masks, logits)
         print('loss value {}'.format(loss_value))
     loss_history.append(loss_value.numpy().mean())
@@ -400,8 +402,8 @@ def train_step(images, masks):
     plt.plot(grad_list)
     plt.show()
     optimizer_Adam.apply_gradients(zip(grads, model.trainable_variables))
-    # print(model.predict(sample_image[tf.newaxis, ...]))
-    # show_predictions(train_dataset, 15)
+    print(model.predict(sample_image[tf.newaxis, ...]))
+    show_predictions(train_dataset, 1)
 
 def train(epochs):
     for epoch in range(epochs):
